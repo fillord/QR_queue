@@ -7,12 +7,16 @@ import enum
 import qrcode
 import os
 from apscheduler.schedulers.background import BackgroundScheduler
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordRequestForm
 
 DATABASE_URL = "sqlite:///./test.db"  # Заменишь на PostgreSQL позже
 
 Base = declarative_base()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base.metadata.create_all(bind=engine, checkfirst=True)
 
 class StatusEnum(str, enum.Enum):
     waiting = "waiting"
@@ -23,7 +27,8 @@ class StatusEnum(str, enum.Enum):
 class Doctor(Base):
     __tablename__ = "doctors"
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String)
+    name = Column(String, unique=True)
+    password = Column(String)
 
 class QueueEntry(Base):
     __tablename__ = "queue_entries"
@@ -54,6 +59,14 @@ def get_db():
         db.close()
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 Base.metadata.create_all(bind=engine)
 
@@ -114,6 +127,24 @@ def generate_qr(doctor_id: int):
     img.save(path)
     return {"message": f"QR-код сохранён в {path}"}
 
+@app.post("/create-doctor")
+def create_doctor(db: Session = Depends(get_db)):
+    doc = Doctor(name="doctor1", password="pass123")
+    db.add(doc)
+    db.commit()
+    return {"message": "Врач создан"}
+
+@app.get("/doctors")
+def get_all_doctors(db: Session = Depends(get_db)):
+    return db.query(Doctor).all()
+
+@app.post("/login")
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    doctor = db.query(Doctor).filter(Doctor.name == form_data.username).first()
+    if not doctor or doctor.password != form_data.password:
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+    return {"doctor_id": doctor.id, "name": doctor.name}
+
 def reset_all_queues():
     db = SessionLocal()
     db.query(QueueEntry).delete()
@@ -124,3 +155,10 @@ def reset_all_queues():
 scheduler = BackgroundScheduler()
 scheduler.add_job(reset_all_queues, "cron", hour=0, minute=0)
 scheduler.start()
+
+from sqlalchemy import inspect
+
+@app.get("/debug/tables")
+def get_tables():
+    inspector = inspect(engine)
+    return inspector.get_table_names()
